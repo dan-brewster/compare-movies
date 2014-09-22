@@ -1,0 +1,532 @@
+<!doctype html>
+<html ng-app="MovieRanker"><head><title>Brewster's Movie Night Rating Tool</title>
+<meta charset="UTF-8"> 
+<meta name="viewport" content="width=device-width, user-scalable=no">
+<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.3.0-rc.0/angular.min.js"></script>
+<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.3.0-rc.0/angular-route.js"></script>
+
+<script src="https://sdk.amazonaws.com/js/aws-sdk-2.0.0.min.js"></script>
+
+<script>
+AWS.config.region = 'us-west-2';
+
+var dragdrop = angular.module("dragdrop", []);
+dragdrop.directive('movieDraggable', ['$rootScope', function($rootScope) {
+        return {
+            restrict: 'A',
+            link: function(scope, el, attrs, controller) {
+                angular.element(el).attr("draggable", "true");
+                 
+                el.bind("dragstart", function(e) {
+                    e.dataTransfer.setData('text', attrs.id);
+                    $rootScope.$emit("DRAG-START");
+                });
+                 
+                el.bind("dragend", function(e) {
+                    $rootScope.$emit("DRAG-END");
+                });
+            }
+        }
+    }]).directive('dropTarget', ['$rootScope', function($rootScope) {
+        return {
+            restrict: 'A',
+            scope: {
+                onDrop: '&',
+                dropBack: '&'
+            },
+            link: function(scope, el, attrs, controller) {
+                var id = attrs.id;
+                if (!id) {
+                    alert("ERROR");
+                }
+                            
+                el.bind("dragover", function(e) {
+                  if (e.preventDefault) {
+                    e.preventDefault(); // Necessary. Allows us to drop.
+                  }
+                   
+                  if(e.stopPropagation) { 
+                    e.stopPropagation(); 
+                  }
+ 
+                  e.dataTransfer.dropEffect = 'move';
+                  return false;
+               });
+                 
+               el.bind("dragenter", function(e) {
+                 console.log(e.target.className);
+                 if((e.target.id && e.target.id.match(/draggable/)) || (e.target.className && e.target.className.match(/draggable/))) {
+                   changer = e.target.parentElement;
+                   if(changer.className.match(/movieButton/)) {
+                     changer = changer.parentElement;
+                   }
+                 } else {
+                   changer = e.target;
+                 }
+                 angular.element(changer).addClass('hoverDropTarget');
+               });
+                 
+               el.bind("dragleave", function(e) {
+                 angular.element(e.target.parentElement).removeClass('hoverDropTarget');
+                 angular.element(e.target).removeClass('hoverDropTarget');  // this / e.target is previous target element.
+               });
+ 
+               el.bind("drop", function(e) {
+                 if (e.preventDefault) {
+                   e.preventDefault(); // Necessary. Allows us to drop.
+                 }
+ 
+                 if (e.stopPropogation) {
+                   e.stopPropogation(); // Necessary. Allows us to drop.
+                 }
+ 
+                 var data = e.dataTransfer.getData("text");
+                 var dest = document.getElementById(id);
+                 var src = document.getElementById(data);
+                 scope.onDrop({dragEl: src, dropEl: dest});
+               });
+ 
+               $rootScope.$on("DRAG-START", function() {
+                  var el = document.getElementById(id);
+                  angular.element(el).addClass("openDragTarget");
+               });
+                 
+               $rootScope.$on("DRAG-END", function() {
+                 var el = document.getElementById(id);
+                 angular.element(el).removeClass("openDragTarget");
+                 angular.element(el).removeClass("hoverDropTarget");
+               });
+            }
+        }
+    }]);
+
+
+
+angular.module('MovieRanker', ['dragdrop'])
+  .controller('MovieRankerController', ['$scope', function($scope) {
+ 
+    var movies = [ ["The Breakfast Club", 0], ["The Goonies", 1], ["Sneakers", 2], ["The Matrix", 3], ["Ghostbusters", 4], ["Groundhog Day", 5], ["Alien", 6], ["Clueless", 7], ["Heathers", 8], ["UHF", 9], ["Hackers", 10], ["Rushmore", 11], ["Breaking Away", 12], ["The Godfather", 13], ["Spice World", 14], ["Labyrinth", 15], ["Blade Runner", 16], ["Tron", 17], ["Brewster's Millions", 18], ["Goodfellas", 19], ["The Big Lebowski", 20], ["Strange Brew", 21] ].sort($scope.sortByFirst);
+
+    var movieRankingTable = new AWS.DynamoDB({params: {TableName: 'MovieRankings'}});
+
+    $scope.movieList = [];
+    for (i = 0; i < movies.length; i++) {
+      $scope.movieList.push(movies[i][0]);
+    }
+    $scope.isAdmin = false;
+    $scope.stopAcceptingName = false;
+    $scope.MIN_MOVIES_RANKED = 5;
+
+    var params = window.location.href.slice(window.location.href.indexOf('?') + 1).split('&');
+    params.forEach(function(p) {
+      p = p.split('=');
+      if(p[0] == 'admin' && p[1] == '1') {
+        $scope.isAdmin = true;
+      }
+    });
+
+    var movieRankingParams = {
+      TableName: 'MovieRankings',
+      AttributesToGet: [ 'Ranking', 'MovieName', 'Username' ]
+    };
+ 
+    $scope.moviesRankedLength = function() {
+      var realArraySize = 0;
+      var mml = $scope.getMyMovieList();
+      for (num in $scope.getMyMovieList()) {
+        if(typeof(num) != "undefined") {
+          realArraySize++;
+        }
+      }
+      return realArraySize;
+    };
+ 
+    var myMovieList = new Array(movies.length);
+    var attemptedToComplete = false;
+    var theResults = [];
+
+    $scope.addToMyMovieList = function(movieName, position) {
+      myMovieList.splice(position, 1, movieName);
+    };
+    $scope.removeFromMyMovieList = function(movieName) {
+      var position = myMovieList.indexOf(movieName);
+      if (position > -1) {
+        delete myMovieList[position];
+      }
+    };
+    $scope.getMyMovieList = function() {
+      return myMovieList;
+    };
+
+    $scope.randomlyAssign = function() {
+      chosen = new Array(movies.length);
+      for(i = 0; i < movies.length; i++) {
+        do {
+          rand = Math.round(Math.random() * (movies.length - 1));
+        } while (chosen[rand] == 1)
+        chosen[rand] = 1;
+        $scope.onDrop(document.getElementById('draggableMovie' + rand), document.getElementById('droptarget' + i));
+      }
+    };
+
+    $scope.dropBack = function(dragEl) {
+      var drag = angular.element(dragEl);
+      $scope.removeFromMyMovieList(drag.text());
+      angular.element(document.getElementById('pool')).append(drag);
+      $scope.$apply();
+    }
+
+    $scope.onDrop = function(dragEl, dropEl) {
+      var drag = angular.element(dragEl);
+      var drop = angular.element(dropEl);
+      var pool = document.getElementById('pool'); 
+      if(drop.html().match(/draggable/)) {
+        angular.element(pool).append(drop[0].children[0]);
+        $scope.removeFromMyMovieList(drag.text());
+      }
+      drop.prepend(drag);
+      $scope.addToMyMovieList(drag.text(), drop[0].id.match(/\d+/)[0]);
+    };
+  
+    $scope.results = function() {
+      return theResults; 
+    };
+
+    $scope.takenUsername = function() {
+      return dataByUser.hasOwnProperty($scope.username);
+    };
+
+    $scope.invalidUsername = function() {
+      return (!angular.isString($scope.username) || $scope.username.length == 0) && attemptedToComplete;
+    }
+    $scope.invalidSelections = function() {
+      return ($scope.moviesRankedLength() < $scope.MIN_MOVIES_RANKED) && attemptedToComplete;
+    }
+ 
+    $scope.getResults = function() {
+      attemptedToComplete = true;
+      if($scope.invalidUsername() || $scope.invalidSelections()) {
+        return;
+      }
+      $scope.stopAcceptingName = true;
+      L = [];
+      R = [];
+      $scope.getMyMovieList().forEach(function(m, i) {
+        L.push([m, i]);
+      });
+      movies.forEach(function(m, i) {
+        R.push([m, i]);
+      });
+      $scope.setRankingInfo($scope.compactSparseArray(L.sort($scope.sortByFirst)));
+      var out = $scope.compare(L.sort($scope.sortByFirst), R.sort($scope.sortByFirst), 'Dan Brewster');
+      theResults.push({ similarity: out, username: 'Dan Brewster'});
+      $scope.outputComparison('Dan Brewster');
+      for (var username in dataByUser) {
+        var outForUser = $scope.compare(L.sort($scope.sortByFirst), dataByUser[username].sort($scope.sortByFirst), username);
+        theResults.push({ similarity: outForUser, username: username});
+      }
+    };
+
+    $scope.classHasEnoughRanked = function() {
+      if((!angular.isString($scope.username) || $scope.username.length == 0) || ($scope.moviesRankedLength() < $scope.MIN_MOVIES_RANKED) || $scope.takenUsername()) {
+        return 'disabled';
+      }
+    } 
+
+    $scope.sortByFirst = function(a,b) {
+      if (a[0]<b[0]) {
+        return -1;
+      }
+      if (a[0]>b[0]) {
+        return 1;
+      }
+      return 0;
+    };
+ 
+    $scope.compactSparseArray = function(sparse) {
+      newAr = [];
+      sparse.forEach(function(el) {
+        newAr.push(el);
+      });
+      return newAr;
+    };
+
+    // R is dbrewster (original) set. L is visitor set.
+    $scope.compare = function(L, R, username) {
+      L = $scope.compactSparseArray(L);
+      newR = [];
+      if (L.length != R.length) {
+        // important to go front-to-back here to preserve alphabetical order
+        for (i = 0; i < L.length; i++) {
+          for (j = 0; j < R.length; j++) {
+            if(R[j][0] == L[i][0]) {
+              newR.push(R[j]);
+              break;
+            }
+          }
+        }
+        R = newR;
+      }
+      m = 0;
+      n = 0;
+      concordant = 0;
+      discordant = 0;
+      while(m < L.length) {
+        n = 0;
+        n = m + 1;
+        while(n < R.length) {
+          ant_val = (L[m][1] - L[n][1]) / (R[m][1] - R[n][1]);
+          //console.log("ANT VAL:", L[m][1], L[m][0], R[m][1], R[m][0], L[n][1], L[n][0], R[n][1], R[n][0], ant_val, m, n);
+          if (ant_val > 0) {
+            concordant++;
+          } else if (ant_val < 0) {
+            discordant++;
+          }
+          n++;
+        }
+        m++;
+      }
+      numerator = concordant - discordant;
+      denominator = (L.length - 1) * L.length * 0.5;
+      return Math.round(((numerator / denominator) + 1) * 50);
+    }
+
+    var dataByUser = {};
+
+    $scope.getData = (function() {
+      movieRankingTable.scan(movieRankingParams, function(err, data) {
+        if (err) {
+          console.log(err, err.stack); // an error occurred
+        } else {
+          for (d in data.Items) {
+            d = data.Items[d];
+            if(dataByUser.hasOwnProperty(d['Username']['S'])) {
+              userData = dataByUser[d['Username']['S']];
+              userData[d['MovieName']['S']] = [d['MovieName']['S'], d['Ranking']['S']];
+            } else {
+              userData = {};
+              userData[d['MovieName']['S']] = [d['MovieName']['S'], d['Ranking']['S']];
+              dataByUser[d['Username']['S']] = userData;
+            }
+          }
+          for (u in dataByUser) {
+            var newUserData = [];
+            for (movie in dataByUser[u]) {
+              newUserData.push(dataByUser[u][movie]);
+            }
+            dataByUser[u] = newUserData;
+          }
+          
+          dataByUser['Dan Brewster'] = movies;
+        }
+      });
+    }());
+   
+    $scope.printDataToConsole = function() {
+      console.log(dataByUser);
+    };
+
+    $scope.comparisonMovieList = [];
+
+    $scope.outputComparison = function(username) {
+      var userComparisonData = dataByUser[username];
+      var compList = new Array(movies.length);
+      if(userComparisonData && userComparisonData.length > 0) {
+        userComparisonData.forEach(function(data) {
+          compList.splice(data[1], 1, data[0]);
+        });
+        $scope.comparisonMovieList = compList;
+        console.log($scope.comparisonMovieList);
+      }
+    }
+
+    $scope.setRankingInfo = function(movieRankingData) {
+      movieRankingData.forEach(function(pair) {
+        var n = new Date().getTime();
+        var timeP = n + Math.round(Math.random() * 100000) + "";
+        var attrData = { ID: { N: timeP + "" }, Ranking: { S: pair[1] + "" }, Username: { S: $scope.username }, MovieName: { S: pair[0] } };
+        newParams = {
+          TableName: 'MovieRankings',
+          Item: attrData };
+        movieRankingTable.putItem(newParams, function(err, data) {
+          if(err) {
+            console.log(err, err.stack);
+          } else {
+            console.log("HURRAY");
+          }
+        });
+      });
+    };
+
+  }]);
+</script>
+<style>
+* {
+  box-sizing: border-box;
+}
+
+.button {
+  background: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAABUCAMAAACfvxb8AAAAeFBMVEVOaaJMZ6FIZJ89W5lBXps8WplDYJxNaKFKZqBGYp5HY54/XJpCX5xFYZ07WZg+XJpLZqBAXZtJZZ9EYZ1NaKI8Wpg9WplMaKFNaaJJZJ9LZ6FEYJ1FYp1DX5xAXptJZaBAXZo+W5k+W5pKZaBGY55LZ6A8WZg/XZpJqQD4AAAAVklEQVR4Xk3CBQoDABADwU3d3d37/x8WAqEHI/jboZV1Y2sqDuiNZtaLJ7qihe1RoxjEC/XjhMaxtCPqxBmNolVc0Nxu6IuGMbUHuqNmsbF2rO2DJhg/RwEE6AR0V3kAAAAASUVORK5CYII=') repeat-x;
+  background-size: 1px 42px;
+  background-position: 0px 0px;
+  border: 1px solid rgba(0,0,0,0.5);
+  border-radius: 5px;
+  color: white;
+  display: inline-block;
+  font-family: Calibri, Arial, sans-serif;
+  margin: 3px;
+  padding: 8px;
+}
+
+.draggable, .clickable {
+  cursor: pointer;
+  box-shadow: 1px 1px 2px rgba(0,0,0,0.75);
+}
+
+.draggable:not(.disabled):hover, .clickable:not(.disabled):hover {
+  box-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+  color: yellow; 
+}
+
+.disabled {
+  cursor: not-allowed;
+  background-image: linear-gradient(#888888, #666666) !important;
+}
+
+.alert {
+  width: 50%;
+  margin: 10px;
+  padding: 20px;
+  font-family: calibri, arial, sans-serif;
+  float: left;
+  background-image: linear-gradient(#ffff99, #eeee66);
+}
+
+.clickable {
+  background-image: linear-gradient(#71B258, #29722E);
+}
+
+.left, .right, .results {
+  float: left;
+  margin: 20px;
+  width: 35%;
+}
+
+.pool, .results {
+  border: 2px solid #eee;
+  min-height: 300px;
+  padding: 20px;
+}
+
+.left h2, .right h2, .results h2 {
+  font-family: Calibri, Arial, sans-serif;
+  margin-top: 0px;
+}
+
+h2 div {
+  font-size: 0.7em;
+}
+
+.left .button {
+  float: left;
+}
+
+.right {
+  width: 50%;
+}
+
+.movierankinglist {
+  -webkit-columns: 2;
+  width: 100%;
+}
+
+.space {
+  background: white;
+  color: #ddd;
+  float: left;
+  font-family: Calibri, Arial, sans-serif;
+  padding: 6px;
+  width: 100%;
+}
+
+.space .button {
+  font-size: 0.9em;
+  margin: 0px;
+  padding: 2px;
+}
+
+.droptarget {
+  height: 48px;
+  clear: both;
+}
+
+.openDragTarget {
+  color: black;
+  background: #eee;
+}
+
+.hoverDropTarget {
+  border: 2px dashed black;
+  color: black;
+  padding: 4px;
+}
+
+.pool.hoverDropTarget {
+  padding: 20px;
+} 
+
+h2 input {
+  font-size: 1em;
+}
+
+.resultRow {
+  font-family: calibri, arial, sans-serif;
+  font-size: 1.05em;
+  padding: 5px;
+  border-top: 2px solid #eee;
+}
+
+.topResult {
+  border: 0px;
+}
+</style>
+</head>
+<body ng-controller='MovieRankerController'>
+
+<div class='left'>
+  <h2 ng-hide='results().length'>Rank movies by dragging them to the right.</h2>
+  <div class='pool' drop-target='true' on-drop='dropBack(dragEl, "pool")' id='pool' ng-hide='results().length'>
+    <div ng-repeat='(index, movie) in movieList' class='movieButton'>
+      <div movie-draggable='true' class='draggable button' id="{{'draggableMovie' + index}}" draggable='true'>{{movie}}</div>
+    </div>
+  </div>
+  <h2 ng-show='results().length'>Movie Similarity Results</h2>
+  <div class='pool' id='results' ng-show='results().length'>
+    <div ng-repeat='result in results()' class='resultRow' ng-class='{topResult:$first}'>
+      {{result.username}}: {{result.similarity}}%
+    </div>
+  </div>
+  <div ng-show='isAdmin'>
+    <div class='clickable button' ng-click='randomlyAssign()'>RANDOMLY ASSIGN</div>
+    <div class='clickable button' ng-click='printDataToConsole()'>Output all data to console</div>
+  </div>
+</div>
+
+<div class='alert' ng-show='takenUsername()'>Please enter a username no one else has taken</div>
+<div class='alert' ng-show='invalidUsername()'>Please enter a name!</div>
+<div class='alert' ng-show='invalidSelections()'>Please pick at least 5 movies!</div>
+
+<div class='right'>
+  <h2>Your Name: <input type='text' ng-model='username' ng-disabled='stopAcceptingName'><div class='button clickable' ng-class='classHasEnoughRanked()' ng-click='getResults()'>Get Results</div>
+  </h2>
+  <div class='pool'>
+    <div class='movierankinglist'>
+      <div class='droptarget' ng-repeat='(index, movie) in movieList'>
+        <div id="{{'droptarget' + index}}" drop-target='true' on-drop='onDrop(dragEl, dropEl)' class='space'>{{$index + 1}} &emsp;<div id="{{'comparsion' + index}}" class='button clickable disabled fully-disabled'>{{comparisonMovieList[index]}}</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
